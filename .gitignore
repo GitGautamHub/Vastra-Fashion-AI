@@ -1,0 +1,28 @@
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Downloaded data (can be large)
+downloaded_fashion_images/
+
+# Generated models (can be large)
+models/
+
+# Streamlit cache and local runs
+.streamlit/
+streamlit_temp/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Specific generated data files if not tracked
+data/vastra_processed_data_with_local_paths.csv
