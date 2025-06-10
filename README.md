@@ -32,6 +32,11 @@ The system processes and understands fashion imagery to provide:
 * Intelligent outfit suggestions that complement the searched item, considering style compatibility.
 * Personalized recommendations based on user interaction patterns.
 * Insights into current fashion trends through "New Arrivals."
+![Vastra Architecture Diagram](docs/vastra01.png)
+
+---
+
+![Vastra Application Screenshot](docs/vastra02.png)
 
 ## Features
 
