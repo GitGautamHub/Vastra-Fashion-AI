@@ -7,7 +7,7 @@ from PIL import Image
 import pandas as pd
 import numpy as np
 import os
-from tqdm.notebook import tqdm # Use tqdm for Jupyter/Colab, or from tqdm import tqdm for console
+from tqdm import tqdm # Use tqdm for Jupyter/Colab, or from tqdm import tqdm for console
 
 # --- Configuration ---
 

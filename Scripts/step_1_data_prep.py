@@ -1,13 +1,13 @@
-
-
 import pandas as pd
 import requests
-from tqdm.notebook import tqdm 
+from tqdm import tqdm 
 import os
 from PIL import Image 
 import ast 
-# --- Configuration ---
+from concurrent.futures import ThreadPoolExecutor, as_completed 
 
+
+# --- Configuration ---
 CSV_FILES = [
     os.path.join('data', 'dresses_bd_processed_data.csv'),
     os.path.join('data', 'jeans_bd_processed_data.csv')
@@ -16,33 +16,43 @@ IMAGES_DIR = 'downloaded_fashion_images'
 OUTPUT_PROCESSED_DATA_PATH = os.path.join('data', 'vastra_processed_data_with_local_paths.csv') # Combined output file
 
 
+MAX_WORKERS = 10 # You can adjust this based on your internet speed and CPU
+
+
 os.makedirs('data', exist_ok=True)
 os.makedirs(IMAGES_DIR, exist_ok=True)
 print(f"Ensured '{os.path.join('data')}' and '{IMAGES_DIR}' directories exist.")
 
 # --- Function to download an image ---
+# NOTE: This function is slightly modified to return the product_id and path
 def download_image(url, save_path, product_id):
     """Downloads an image from a URL and saves it to a specified path."""
     if pd.isna(url) or url == '': # Check if URL is NaN or empty string
-        return None
+        return product_id, None
+
+    if os.path.exists(save_path):
+        return product_id, save_path # Skip download if file already exists
+
     try:
         response = requests.get(url, stream=True, timeout=10)
         response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
         with open(save_path, 'wb') as out_file:
             for chunk in response.iter_content(chunk_size=8192):
                 out_file.write(chunk)
-        return save_path
+        return product_id, save_path
     except requests.exceptions.RequestException as e:
-        print(f"Error downloading image for product_id {product_id} from {url}: {e}", flush=True)
-        return None
+        # Use print here as it's running in a thread, flush=True helps
+        print(f"Error downloading image for product_id {product_id} from {url}: {e}", flush=True) 
+        return product_id, None
     except Exception as e:
         print(f"An unexpected error occurred for product_id {product_id} from {url}: {e}", flush=True)
-        return None
+        return product_id, None
 
 # --- Main execution block ---
 if __name__ == "__main__":
     print(f"Attempting to load datasets from: {CSV_FILES}")
     
+    # ... (DataFrame loading, concatenation, and deduplication logic remains the same) ...
     all_dfs = []
     for file_path in CSV_FILES:
         try:
@@ -52,8 +62,6 @@ if __name__ == "__main__":
         except FileNotFoundError:
             print(f"Error: Dataset file not found at {file_path}.")
             print(f"Please ensure '{os.path.basename(file_path)}' is placed inside the 'data' folder.")
-            # Depending on your requirement, you might want to exit here or continue with other files.
-            # For now, we'll continue to try loading other files.
         except Exception as e:
             print(f"Error loading {file_path}: {e}")
             
@@ -61,79 +69,68 @@ if __name__ == "__main__":
         print("No datasets were loaded. Exiting.")
         exit()
 
-    # Concatenate all dataframes into a single one
     df = pd.concat(all_dfs, ignore_index=True)
     print(f"\nSuccessfully combined {len(all_dfs)} datasets.")
     print(f"Total rows in combined DataFrame: {len(df)}")
     
-    print("\nCombined DataFrame Info:")
-    df.info()
-    print("\nFirst 5 rows of the combined dataset:")
-    print(df.head())
-    print("\nMissing values for key image columns (feature_image_s3):")
-    print(df['feature_image_s3'].isnull().sum())
-    
-    
     if 'product_id' in df.columns:
         df['product_id'] = df['product_id'].astype(str)
     else:
-        print("Warning: 'product_id' column not found. Generating unique IDs for image names.")
-        df['product_id'] = [f"item_{i}" for i in range(len(df))] # Fallback unique ID generation
-
+        df['product_id'] = [f"item_{i}" for i in range(len(df))]
 
     initial_rows = len(df)
     df.drop_duplicates(subset=['product_id'], inplace=True)
     if len(df) < initial_rows:
         print(f"Removed {initial_rows - len(df)} duplicate product IDs.")
 
-
-    # --- Download all feature images ---
-    print(f"\nStarting primary feature image download to {IMAGES_DIR}...")
-    downloaded_image_paths = []
-    skipped_downloads = 0
-
-
-    for index, row in tqdm(df.iterrows(), total=len(df), desc="Downloading Images"):
+    # --- Prepare download arguments and Filter out missing URLs before parallelizing ---
+    download_args = []
+    for index, row in df.iterrows():
         product_id = row['product_id']
         image_url = row['feature_image_s3']
 
         if pd.isna(image_url) or image_url == '':
-            skipped_downloads += 1
-            downloaded_image_paths.append(None)
             continue
-
-        try:
-            # Try to infer extension, default to .jpg if not found
-            file_extension = os.path.splitext(image_url)[1]
-            if not file_extension or len(file_extension) > 5 or '?' in file_extension:
-                file_extension = '.jpg' # Default to jpg if extension looks weird or is too long
             
-            image_name = f"{product_id}{file_extension.lower()}"
-            save_path = os.path.join(IMAGES_DIR, image_name)
+        # Try to infer extension, default to .jpg if not found
+        file_extension = os.path.splitext(image_url)[1]
+        if not file_extension or len(file_extension) > 5 or '?' in file_extension:
+            file_extension = '.jpg'
+            
+        image_name = f"{product_id}{file_extension.lower()}"
+        save_path = os.path.join(IMAGES_DIR, image_name)
+        
+        # Store the arguments
+        download_args.append((image_url, save_path, product_id))
 
-            if not os.path.exists(save_path): # Download only if not already downloaded
-                path = download_image(image_url, save_path, product_id)
-                if path:
-                    downloaded_image_paths.append(path)
-                else:
-                    downloaded_image_paths.append(None)
-                    skipped_downloads += 1
-            else:
-                downloaded_image_paths.append(save_path) # Already exists, just add path
+    print(f"\nStarting primary feature image download to {IMAGES_DIR} with {MAX_WORKERS} parallel threads...")
+    
+    # --- PARALLEL DOWNLOAD LOGIC ---
+    results = {}
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all download tasks
+        future_to_product = {
+            executor.submit(download_image, url, path, pid): pid 
+            for url, path, pid in download_args
+        }
 
-        except Exception as e:
-            print(f"Error processing URL {image_url} for product_id {product_id}: {e}", flush=True)
-            downloaded_image_paths.append(None)
-            skipped_downloads += 1
+        # Use tqdm to monitor the progress of completed tasks
+        for future in tqdm(as_completed(future_to_product), total=len(future_to_product), desc="Downloading Images"):
+            product_id, local_path = future.result()
+            results[product_id] = local_path
+    
+    # Map results back to the DataFrame
+    df['local_image_path'] = df['product_id'].map(results)
+    # -------------------------------
+    
+    # ... (The rest of the post-download summary and saving logic remains the same) ...
 
-
-    df['local_image_path'] = downloaded_image_paths
-
-    print(f"\nImage download complete. Total images processed: {len(df)}")
-    successful_downloads = len(df) - df['local_image_path'].isnull().sum()
+    print(f"\nImage download complete. Total products considered: {len(df)}")
+    successful_downloads = df['local_image_path'].count() # Count non-None values
+    skipped_downloads = len(df) - successful_downloads
     print(f"Successfully tracked image paths for: {successful_downloads} images.")
     print(f"Skipped/Failed downloads (due to missing URL, download error, etc.): {skipped_downloads} images.")
-
 
     df_processed = df.dropna(subset=['local_image_path']).copy()
     print(f"DataFrame after filtering out products with no local image: {len(df_processed)} rows.")
@@ -142,7 +139,7 @@ if __name__ == "__main__":
     df_processed.to_csv(OUTPUT_PROCESSED_DATA_PATH, index=False)
     print(f"\nUpdated and combined DataFrame saved to '{OUTPUT_PROCESSED_DATA_PATH}'")
 
-
+    # ... (Matplotlib display logic) ...
     try:
         import matplotlib.pyplot as plt
         import random
